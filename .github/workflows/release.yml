@@ -1,0 +1,128 @@
+name: Release
+
+# To release:
+#
+# tag=v1.1.0-76ced61
+# git tag -f "${tag:?}"
+# git push origin -f refs/heads/"${tag:?}"
+# git push origin -f refs/tags/"${tag:?}"
+
+permissions:
+  contents: read
+
+on:
+  push:
+    tags:
+      - v[0-9]+.[0-9]+.[0-9]+-*
+
+defaults:
+  run:
+    shell: bash --noprofile --norc -CeEuxo pipefail {0}
+
+jobs:
+  release:
+    if: github.repository_owner == 'taiki-e'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: taiki-e/checkout-action@v1
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  upload:
+    if: github.repository_owner == 'taiki-e'
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          # - macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    steps:
+      - uses: taiki-e/checkout-action@v1
+      - run: |
+          retry() {
+            for i in {1..10}; do
+              if "$@"; then
+                return 0
+              else
+                sleep "${i}"
+              fi
+            done
+            "$@"
+          }
+          retry sudo apt-get -o Acquire::Retries=10 -qq update
+          retry sudo apt-get -o Acquire::Retries=10 -o Dpkg::Use-Pty=0 install -y --no-install-recommends \
+            device-tree-compiler \
+            gcc-riscv64-linux-gnu \
+            libboost-regex-dev \
+            libboost-system-dev \
+            libc6-dev-riscv64-cross
+        if: startsWith(matrix.os, 'ubuntu')
+      - run: |
+          retry() {
+            for i in {1..10}; do
+              if "$@"; then
+                return 0
+              else
+                sleep "${i}"
+              fi
+            done
+            "$@"
+          }
+
+          prefix="${HOME}"/riscv-isa-sim
+
+          retry git clone https://github.com/riscv-software-src/riscv-pk.git
+          (
+            export CFLAGS="-g0 -O2 ${CFLAGS:-}"
+            export CXXFLAGS="-g0 -O2 ${CXXFLAGS:-}"
+            export LDFLAGS="-s ${LDFLAGS:-}"
+            mkdir -- build
+            cd -- build
+            ../configure --prefix="${prefix}"
+            make
+            make install
+          )
+          (
+            export CFLAGS="-O2 ${CFLAGS:-}"
+            export CXXFLAGS="-O2 ${CXXFLAGS:-}"
+            cd -- riscv-pk
+            git checkout 9c61d29
+            mkdir -- build
+            cd -- build
+            ../configure --prefix="${prefix}" --host=riscv64-linux-gnu
+            make
+            make install
+          )
+
+          mkdir -p -- "${prefix}"/share/doc/{riscv-isa-sim,riscv-pk}
+          cp -- ./LICENSE* "${prefix}"/share/doc/riscv-isa-sim
+          cp -- ./riscv-pk/LICENSE* "${prefix}"/share/doc/riscv-pk
+
+          wd=$(pwd)
+          cd "${prefix}"/..
+          tar acvf "${wd}"/riscv-isa-sim-"${{ matrix.os }}".tar.xz riscv-isa-sim
+      - run: |
+          retry() {
+            for i in {1..10}; do
+              if "$@"; then
+                return 0
+              else
+                sleep "${i}"
+              fi
+            done
+            "$@"
+          }
+          tag="${GITHUB_REF#refs/tags/}"
+          retry gh release upload "${tag}" riscv-isa-sim-"${{ matrix.os }}".tar.xz --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
